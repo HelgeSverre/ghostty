@@ -471,16 +471,37 @@ class BaseTerminalController: NSWindowController,
                 Ghostty.moveFocus(to: newView, from: oldView)
             }
         }
-        
+
+        // Collect surfaces that are in the old tree but not in the new tree.
+        // These need to be cleaned up if the undo expires without being executed.
+        let oldSurfaces = oldTree.root?.leaves() ?? []
+        let newSurfaces = newTree.root?.leaves() ?? []
+        let removedSurfaces = oldSurfaces.filter { oldSurface in
+            !newSurfaces.contains { $0 === oldSurface }
+        }
+
         // Setup our undo
-        guard let undoManager else { return }
+        guard let undoManager else {
+            // No undo manager - close removed surfaces immediately
+            for surface in removedSurfaces {
+                surface.close()
+            }
+            return
+        }
         if let undoAction {
             undoManager.setActionName(undoAction)
         }
-        
+
         undoManager.registerUndo(
             withTarget: self,
-            expiresAfter: undoExpiration
+            expiresAfter: undoExpiration,
+            onExpire: {
+                // Undo expired without being executed - the user is not restoring the old tree.
+                // Close the removed surfaces to free their resources and terminate child processes.
+                for surface in removedSurfaces {
+                    surface.close()
+                }
+            }
         ) { target in
             target.surfaceTree = oldTree
             if let oldView {
@@ -488,7 +509,7 @@ class BaseTerminalController: NSWindowController,
                     Ghostty.moveFocus(to: oldView, from: target.focusedSurface)
                 }
             }
-            
+
             undoManager.registerUndo(
                 withTarget: target,
                 expiresAfter: target.undoExpiration
@@ -1201,6 +1222,9 @@ class BaseTerminalController: NSWindowController,
 
     func windowWillClose(_ notification: Notification) {
         guard let window else { return }
+
+        // Cancel any Combine subscriptions to prevent retention
+        focusedSurfaceCancellables.removeAll()
 
         // I don't know if this is required anymore. We previously had a ref cycle between
         // the view and the window so we had to nil this out to break it but I think this

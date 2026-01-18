@@ -27,6 +27,10 @@ class TerminalViewContainer<ViewModel: TerminalViewModel>: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
     /// To make ``TerminalController/DefaultSize/contentIntrinsicSize``
     /// work in ``TerminalController/windowDidLoad()``,
     /// we override this to provide the correct size.

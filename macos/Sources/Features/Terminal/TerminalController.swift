@@ -644,11 +644,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Undo
         if let undoManager, let undoState {
+            // Collect surfaces that need cleanup if undo expires
+            let surfaces = undoState.surfaceTree.root?.leaves() ?? []
+
             // Register undo action to restore the tab
             undoManager.setActionName("Close Tab")
             undoManager.registerUndo(
                 withTarget: ghostty,
-                expiresAfter: undoExpiration
+                expiresAfter: undoExpiration,
+                onExpire: {
+                    // Undo expired without being executed - close the surfaces
+                    for surface in surfaces {
+                        surface.close()
+                    }
+                }
             ) { ghostty in
                 let newController = TerminalController(ghostty, with: undoState)
 
@@ -789,11 +798,21 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
               tabGroup.windows.count > 1 else {
             // No tabs, just save this window's state
             if let undoState {
+                // Collect surfaces that need cleanup if undo expires
+                let surfaces = undoState.surfaceTree.root?.leaves() ?? []
+
                 // Register undo action to restore the window
                 undoManager.setActionName("Close Window")
                 undoManager.registerUndo(
                     withTarget: ghostty,
-                    expiresAfter: undoExpiration) { ghostty in
+                    expiresAfter: undoExpiration,
+                    onExpire: {
+                        // Undo expired without being executed - close the surfaces
+                        for surface in surfaces {
+                            surface.close()
+                        }
+                    }
+                ) { ghostty in
                         // Restore the undo state
                         let newController = TerminalController(ghostty, with: undoState)
 
@@ -846,10 +865,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Register undo action to restore all windows
         guard !undoStates.isEmpty else { return }
 
+        // Collect all surfaces from all undo states that need cleanup if undo expires
+        let allSurfaces = undoStates.flatMap { $0.surfaceTree.root?.leaves() ?? [] }
+
         undoManager.setActionName("Close Window")
         undoManager.registerUndo(
             withTarget: ghostty,
-            expiresAfter: undoExpiration
+            expiresAfter: undoExpiration,
+            onExpire: {
+                // Undo expired without being executed - close all surfaces
+                for surface in allSurfaces {
+                    surface.close()
+                }
+            }
         ) { ghostty in
             // Restore all windows in the tab group
             let controllers = undoStates.map { undoState in
@@ -1117,6 +1145,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func windowWillClose(_ notification: Notification) {
         super.windowWillClose(notification)
+
+        // Cancel any Combine subscriptions to prevent retention
+        surfaceAppearanceCancellables.removeAll()
+
         self.relabelTabs()
 
         // If we remove a window, we reset the cascade point to the key window so that

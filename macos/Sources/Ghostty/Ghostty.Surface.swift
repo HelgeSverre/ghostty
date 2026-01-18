@@ -1,4 +1,5 @@
 import GhosttyKit
+import os
 
 extension Ghostty {
     /// Represents a single surface within Ghostty.
@@ -12,6 +13,16 @@ extension Ghostty {
     final class Surface: Sendable {
         private let surface: ghostty_surface_t
 
+        /// Track whether this surface has been explicitly closed.
+        /// Access must be synchronized since Surface is Sendable.
+        private let _isClosed = OSAllocatedUnfairLock(initialState: false)
+
+        /// Whether this surface has been closed. Once closed, the surface
+        /// cannot be used and ghostty_surface_free has been called.
+        var isClosed: Bool {
+            _isClosed.withLock { $0 }
+        }
+
         /// Read the underlying C value for this surface. This is unsafe because the value will be
         /// freed when the Surface class is deinitialized.
         var unsafeCValue: ghostty_surface_t {
@@ -24,14 +35,46 @@ extension Ghostty {
         }
 
         deinit {
-            // deinit is not guaranteed to happen on the main actor and our API
-            // calls into libghostty must happen there so we capture the surface
-            // value so we don't capture `self` and then we detach it in a task.
-            // We can't wait for the task to succeed so this will happen sometime
-            // but that's okay.
+            // Close if not already closed. This handles the case where the Surface
+            // is deallocated without an explicit close() call.
+            closeIfNeeded()
+        }
+
+        /// Explicitly close this surface, freeing the underlying Ghostty resources.
+        ///
+        /// This method is idempotent - calling it multiple times has no effect after
+        /// the first call. It sends SIGHUP to child processes and frees terminal memory.
+        ///
+        /// Call this method when you know the surface will no longer be needed, rather
+        /// than relying solely on deinit. This ensures timely cleanup of resources
+        /// including termination of child processes.
+        func close() {
+            closeIfNeeded()
+        }
+
+        /// Internal close implementation that checks and sets the closed flag.
+        private func closeIfNeeded() {
+            let shouldClose = _isClosed.withLock { isClosed -> Bool in
+                if isClosed { return false }
+                isClosed = true
+                return true
+            }
+
+            guard shouldClose else { return }
+
+            // Capture surface value to avoid capturing self
             let surface = self.surface
-            Task.detached { @MainActor in
+
+            // If we're already on the main actor, call directly
+            if Thread.isMainThread {
                 ghostty_surface_free(surface)
+            } else {
+                // Must call on main actor - use Task.detached but this is now
+                // just a fallback for deinit called from background thread.
+                // Explicit close() should be preferred.
+                Task.detached { @MainActor in
+                    ghostty_surface_free(surface)
+                }
             }
         }
 

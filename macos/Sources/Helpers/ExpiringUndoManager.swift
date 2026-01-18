@@ -1,3 +1,5 @@
+import Foundation
+
 /// An UndoManager subclass that supports registering undo operations that automatically expire after a specified duration.
 ///
 /// This class extends the standard UndoManager to add time-based expiration for undo operations.
@@ -29,22 +31,53 @@ class ExpiringUndoManager: UndoManager {
         expiresAfter duration: Duration,
         handler: @escaping (TargetType) -> Void
     ) {
+        registerUndo(withTarget: target, expiresAfter: duration, onExpire: nil, handler: handler)
+    }
+
+    /// Registers an undo operation that automatically expires after the specified duration,
+    /// with an optional cleanup closure called when the undo expires without being executed.
+    ///
+    /// - Parameters:
+    ///   - target: The target object for the undo operation. The undo operation will be removed
+    ///             if this object is deallocated before the operation is invoked.
+    ///   - duration: The duration after which the undo operation should expire and be removed from the undo stack.
+    ///   - onExpire: An optional closure called when the undo expires without being executed.
+    ///               Use this to clean up resources that were being held for potential undo.
+    ///               This closure is NOT called if the undo is actually executed.
+    ///   - handler: The closure to execute when the undo operation is invoked. The closure receives
+    ///              the target object as its parameter.
+    func registerUndo<TargetType: AnyObject>(
+        withTarget target: TargetType,
+        expiresAfter duration: Duration,
+        onExpire: (() -> Void)?,
+        handler: @escaping (TargetType) -> Void
+    ) {
         // Ignore instantly expiring undos
-        guard duration.timeInterval > 0 else { return }
+        guard duration.timeInterval > 0 else {
+            // If duration is 0, immediately call onExpire since there's no undo window
+            onExpire?()
+            return
+        }
 
         // Ignore when undo registration is disabled. UndoManager still lets
         // registration happen then cancels later but I was seeing some
         // weird behavior with this so let's just guard on it.
-        guard self.isUndoRegistrationEnabled else { return }
+        guard self.isUndoRegistrationEnabled else {
+            onExpire?()
+            return
+        }
 
         let expiringTarget = ExpiringTarget(
             target,
             expiresAfter: duration,
+            onExpire: onExpire,
             in: self)
         expiringTargets.insert(expiringTarget)
 
         super.registerUndo(withTarget: expiringTarget) { [weak self] expiringTarget in
             self?.expiringTargets.remove(expiringTarget)
+            // Mark that undo was executed, so onExpire won't be called
+            expiringTarget.undoWasExecuted = true
             guard let target = expiringTarget.target as? TargetType else { return }
             handler(target)
         }
@@ -98,22 +131,31 @@ class ExpiringUndoManager: UndoManager {
 private class ExpiringTarget {
     /// The actual target object for the undo operation, held weakly to avoid retain cycles.
     private(set) weak var target: AnyObject?
-    
+
     /// Timer that triggers expiration after the specified duration.
     private var timer: Timer?
-    
+
     /// The undo manager from which to remove actions when this target expires.
     private weak var undoManager: UndoManager?
+
+    /// Closure called when the undo expires without being executed.
+    private let onExpire: (() -> Void)?
+
+    /// Whether the undo was actually executed (vs expired).
+    /// When true, onExpire will NOT be called during expire().
+    var undoWasExecuted = false
 
     /// Creates an expiring target that will automatically remove undo actions after the specified duration.
     ///
     /// - Parameters:
     ///   - target: The target object to hold weakly.
     ///   - duration: The time after which the target should expire.
+    ///   - onExpire: Optional closure called when the undo expires without being executed.
     ///   - undoManager: The UndoManager from which to remove actions when expired.
-    init(_ target: AnyObject? = nil, expiresAfter duration: Duration, in undoManager: UndoManager) {
+    init(_ target: AnyObject? = nil, expiresAfter duration: Duration, onExpire: (() -> Void)?, in undoManager: UndoManager) {
         self.target = target
         self.undoManager = undoManager
+        self.onExpire = onExpire
         self.timer = Timer.scheduledTimer(
             withTimeInterval: duration.timeInterval,
             repeats: false) { [weak self] _ in
@@ -125,7 +167,15 @@ private class ExpiringTarget {
     ///
     /// This method is called automatically when the timer fires, but can also be called manually
     /// to expire the target before the timer duration has elapsed.
+    ///
+    /// If `undoWasExecuted` is false (meaning the undo was NOT executed by the user),
+    /// the `onExpire` closure will be called to allow cleanup of resources that were
+    /// being held for potential undo.
     func expire() {
+        // Call onExpire only if undo was NOT executed
+        if !undoWasExecuted {
+            onExpire?()
+        }
         target = nil
         undoManager?.removeAllActions(withTarget: self)
         timer?.invalidate()

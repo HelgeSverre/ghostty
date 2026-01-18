@@ -419,8 +419,28 @@ extension Ghostty {
             let identifiers = Array(self.notificationIdentifiers)
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
 
-            // Cancel progress report timer
+            // Cancel timers
             progressReportTimer?.invalidate()
+            titleChangeTimer?.invalidate()
+        }
+
+        /// Explicitly close this surface, releasing underlying Ghostty resources.
+        ///
+        /// This method should be called when the surface is being permanently removed
+        /// (not just temporarily hidden or stored for undo). It ensures that:
+        /// - Child processes receive SIGHUP and are terminated
+        /// - Terminal memory (scrollback pages) is freed
+        /// - The surface is marked as closed
+        ///
+        /// This method is idempotent - calling it multiple times is safe.
+        /// After calling close(), the surface should not be used.
+        func close() {
+            surfaceModel?.close()
+        }
+
+        /// Whether this surface has been closed.
+        var isClosed: Bool {
+            surfaceModel?.isClosed ?? true
         }
 
         func focusDidChange(_ focused: Bool) {
